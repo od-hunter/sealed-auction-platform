@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Form Validation Test</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .animate-pulse-slow {
+            animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .stellar-gradient {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        }
+    </style>
+</head>
+<body class="stellar-gradient min-h-screen text-white p-8">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold mb-8 text-center">Form Validation Test Suite</h1>
+        
+        <!-- Test Results -->
+        <div id="testResults" class="glass-effect rounded-xl p-6 mb-8">
+            <h2 class="text-xl font-bold mb-4">Test Results</h2>
+            <div id="resultsList" class="space-y-2"></div>
+        </div>
+
+        <!-- Test Forms -->
+        <div class="space-y-6">
+            <!-- Username Test -->
+            <div class="glass-effect rounded-xl p-6">
+                <h3 class="text-lg font-bold mb-4">Username Validation</h3>
+                <input type="text" id="testUsername" placeholder="Enter username" 
+                       class="w-full px-4 py-2 rounded-lg bg-white bg-opacity-20 border border-white border-opacity-30 focus:outline-none focus:ring-2 focus:ring-purple-400">
+                <div class="mt-4 space-x-2">
+                    <button onclick="testUsername('valid')" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded transition">Test Valid</button>
+                    <button onclick="testUsername('short')" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded transition">Test Too Short</button>
+                    <button onclick="testUsername('invalid')" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded transition">Test Invalid Chars</button>
+                </div>
+            </div>
+
+            <!-- Password Test -->
+            <div class="glass-effect rounded-xl p-6">
+                <h3 class="text-lg font-bold mb-4">Password Validation</h3>
+                <input type="password" id="testPassword" placeholder="Enter password" 
+                       class="w-full px-4 py-2 rounded-lg bg-white bg-opacity-20 border border-white border-opacity-30 focus:outline-none focus:ring-2 focus:ring-purple-400">
+                <div class="mt-4 space-x-2">
+                    <button onclick="testPassword('valid')" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded transition">Test Valid</button>
+                    <button onclick="testPassword('short')" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded transition">Test Too Short</button>
+                    <button onclick="testPassword('weak')" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded transition">Test Weak</button>
+                </div>
+            </div>
+
+            <!-- Bid Amount Test -->
+            <div class="glass-effect rounded-xl p-6">
+                <h3 class="text-lg font-bold mb-4">Bid Amount Validation</h3>
+                <input type="number" id="testBidAmount" placeholder="Enter bid amount" 
+                       class="w-full px-4 py-2 rounded-lg bg-white bg-opacity-20 border border-white border-opacity-30 focus:outline-none focus:ring-2 focus:ring-purple-400">
+                <div class="mt-4 space-x-2">
+                    <button onclick="testBidAmount('valid')" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded transition">Test Valid</button>
+                    <button onclick="testBidAmount('zero')" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded transition">Test Zero</button>
+                    <button onclick="testBidAmount('negative')" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded transition">Test Negative</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="public/app.js"></script>
+    <script>
+        // Test validation functions
+        function addTestResult(testName, passed, message) {
+            const resultsList = document.getElementById('resultsList');
+            const resultItem = document.createElement('div');
+            resultItem.className = `flex items-center justify-between p-2 rounded ${passed ? 'bg-green-500 bg-opacity-20' : 'bg-red-500 bg-opacity-20'}`;
+            resultItem.innerHTML = `
+                <span class="font-medium">${testName}</span>
+                <span class="flex items-center">
+                    <i class="fas fa-${passed ? 'check-circle text-green-400' : 'exclamation-circle text-red-400'} mr-2"></i>
+                    ${message}
+                </span>
+            `;
+            resultsList.appendChild(resultItem);
+        }
+
+        function testUsername(type) {
+            const field = document.getElementById('testUsername');
+            clearFieldError('testUsername');
+            
+            let value, expected, testName;
+            
+            switch(type) {
+                case 'valid':
+                    value = 'testuser123';
+                    expected = true;
+                    testName = 'Username - Valid';
+                    break;
+                case 'short':
+                    value = 'ab';
+                    expected = false;
+                    testName = 'Username - Too Short';
+                    break;
+                case 'invalid':
+                    value = 'test@user';
+                    expected = false;
+                    testName = 'Username - Invalid Characters';
+                    break;
+            }
+            
+            field.value = value;
+            const result = validateField('testUsername', value, true);
+            
+            addTestResult(testName, result === expected, 
+                result === expected ? '✓ Validation passed' : '✗ Validation failed');
+        }
+
+        function testPassword(type) {
+            const field = document.getElementById('testPassword');
+            clearFieldError('testPassword');
+            
+            let value, expected, testName;
+            
+            switch(type) {
+                case 'valid':
+                    value = 'TestPass123';
+                    expected = true;
+                    testName = 'Password - Valid';
+                    break;
+                case 'short':
+                    value = '123';
+                    expected = false;
+                    testName = 'Password - Too Short';
+                    break;
+                case 'weak':
+                    value = 'weakpassword';
+                    expected = false;
+                    testName = 'Password - No Uppercase/Number';
+                    break;
+            }
+            
+            field.value = value;
+            const result = validateField('testPassword', value, true);
+            
+            addTestResult(testName, result === expected, 
+                result === expected ? '✓ Validation passed' : '✗ Validation failed');
+        }
+
+        function testBidAmount(type) {
+            const field = document.getElementById('testBidAmount');
+            clearFieldError('testBidAmount');
+            
+            let value, expected, testName;
+            
+            switch(type) {
+                case 'valid':
+                    value = '100.50';
+                    expected = true;
+                    testName = 'Bid Amount - Valid';
+                    break;
+                case 'zero':
+                    value = '0';
+                    expected = false;
+                    testName = 'Bid Amount - Zero';
+                    break;
+                case 'negative':
+                    value = '-10';
+                    expected = false;
+                    testName = 'Bid Amount - Negative';
+                    break;
+            }
+            
+            field.value = value;
+            const result = validateField('testBidAmount', parseFloat(value), true);
+            
+            addTestResult(testName, result === expected, 
+                result === expected ? '✓ Validation passed' : '✗ Validation failed');
+        }
+
+        // Run all tests on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(() => {
+                addTestResult('Test Suite Initialized', true, 'Ready to run validation tests');
+            }, 100);
+        });
+    </script>
+</body>
+</html>

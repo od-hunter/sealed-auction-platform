@@ -8,6 +8,7 @@ A secure, web-based sealed-bid auction platform with private input encryption an
 - **Real-time Updates**: Live auction status and bid count updates using Socket.io
 - **Secure Authentication**: User registration and login with bcrypt password hashing
 - **Responsive Design**: Modern, mobile-friendly interface using Tailwind CSS
+- **Dark Mode Toggle**: Switch between light and dark themes with localStorage persistence
 - **Rate Limiting**: Protection against brute force attacks and spam
 - **Auto-Closing**: Auctions automatically close when their end time is reached
 
@@ -69,6 +70,12 @@ npm run dev
 - The highest bid wins
 - Winners and winning amounts are displayed after auction closure
 
+### Theme Customization
+- Toggle between light and dark modes using the switch in the header
+- Theme preference is automatically saved and persists across sessions
+- System theme preference is detected and respected by default
+- Smooth transitions between theme changes
+
 ## API Endpoints
 
 ### Authentication
@@ -113,6 +120,8 @@ npm run dev
 - **Tailwind CSS** for styling
 - **Socket.io client** for real-time updates
 - **Font Awesome** for icons
+- **CSS Variables** for dynamic theming
+- **localStorage** for theme persistence
 
 ### Data Storage
 - In-memory storage using JavaScript Maps
