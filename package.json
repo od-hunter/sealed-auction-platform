@@ -21,6 +21,7 @@
     "express": "^4.22.1",
     "express-rate-limit": "^6.11.2",
     "helmet": "^7.2.0",
+    "rate-limiter-flexible": "^4.0.1",
     "socket.io": "^4.8.3",
     "soroban-client": "^0.9.0",
     "stellar-sdk": "^11.3.0",
