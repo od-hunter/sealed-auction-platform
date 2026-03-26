@@ -229,8 +229,13 @@ restoreData();
 // Routes
 app.get('/api/auctions', (req, res) => {
   try {
-    const auctions = db.getActiveAuctions();
-    const auctionList = auctions.map(auction => ({
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const status = req.query.status || null;
+    
+    const result = db.getPaginatedAuctions(page, limit, status);
+    
+    const auctionList = result.auctions.map(auction => ({
       id: auction.id,
       title: auction.title,
       description: auction.description,
@@ -241,7 +246,11 @@ app.get('/api/auctions', (req, res) => {
       bidCount: db.getBidCount(auction.id),
       creator: auction.creator_id
     }));
-    res.json(auctionList);
+    
+    res.json({
+      auctions: auctionList,
+      pagination: result.pagination
+    });
   } catch (error) {
     console.error('Error fetching auctions:', error);
     res.status(500).json({ error: 'Failed to fetch auctions' });

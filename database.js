@@ -123,6 +123,36 @@ class AuctionDatabase {
     return stmt.all();
   }
 
+  getPaginatedAuctions(page = 1, limit = 10, status = null) {
+    const offset = (page - 1) * limit;
+    let query = 'SELECT * FROM auctions';
+    let countQuery = 'SELECT COUNT(*) as total FROM auctions';
+    
+    if (status) {
+      query += " WHERE status = ?";
+      countQuery += " WHERE status = ?";
+    }
+    
+    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    
+    const countStmt = this.db.prepare(countQuery);
+    const auctionsStmt = this.db.prepare(query);
+    
+    const totalResult = status ? countStmt.get(status) : countStmt.get();
+    const auctions = status ? auctionsStmt.all(status, limit, offset) : auctionsStmt.all(limit, offset);
+    
+    return {
+      auctions,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: totalResult.total,
+        totalPages: Math.ceil(totalResult.total / limit),
+        hasMore: offset + auctions.length < totalResult.total
+      }
+    };
+  }
+
   updateAuction(id, updates) {
     const fields = [];
     const values = [];

@@ -5,6 +5,10 @@ const socket = io();
 let currentUser = null;
 let auctions = [];
 let currentTab = "auctions";
+let currentPage = 1;
+let isLoading = false;
+let hasMoreAuctions = true;
+const AUCTIONS_PER_PAGE = 10;
 
 // DOM elements
 const authModal = document.getElementById("authModal");
@@ -32,7 +36,10 @@ function initializeApp() {
     }
     
     // Load initial auctions
-    loadAuctions();
+    loadAuctions(true);
+    
+    // Setup infinite scroll
+    setupInfiniteScroll();
 }
 
 function setupEventListeners() {
@@ -139,17 +146,49 @@ function hideAuthModal() {
 }
 
 // Auction functions
-function loadAuctions() {
-    fetch("/api/auctions")
+function loadAuctions(reset = false) {
+    if (isLoading || (!hasMoreAuctions && !reset)) return;
+    
+    isLoading = true;
+    showLoadingIndicator();
+    
+    if (reset) {
+        currentPage = 1;
+        auctions = [];
+        renderAuctions();
+    }
+    
+    fetch(`/api/auctions?page=${currentPage}&limit=${AUCTIONS_PER_PAGE}`)
     .then(response => response.json())
     .then(data => {
-        auctions = data;
+        const { auctions: newAuctions, pagination } = data;
+        
+        if (reset) {
+            auctions = newAuctions;
+        } else {
+            auctions = [...auctions, ...newAuctions];
+        }
+        
+        currentPage = pagination.page;
+        hasMoreAuctions = pagination.hasMore;
+        isLoading = false;
+        
         renderAuctions();
+        hideLoadingIndicator();
     })
     .catch(error => {
         console.error("Error loading auctions:", error);
         showNotification("Failed to load auctions", "error");
+        isLoading = false;
+        hideLoadingIndicator();
     });
+}
+
+function loadMoreAuctions() {
+    if (!isLoading && hasMoreAuctions) {
+        currentPage++;
+        loadAuctions(false);
+    }
 }
 
 function renderAuctions() {
@@ -167,16 +206,54 @@ function renderAuctions() {
         return;
     }
     
+    // Render all auctions in correct order (newest first)
     auctions.forEach(auction => {
-        addAuctionToGrid(auction);
+        const auctionCard = createAuctionCard(auction);
+        auctionsGrid.insertAdjacentHTML("beforeend", auctionCard);
     });
 }
 
-function addAuctionToGrid(auction) {
+function setupInfiniteScroll() {
+    window.addEventListener('scroll', () => {
+        const { scrollTop, scrollHeight, clientHeight } = document.documentElement;
+        
+        // Load more when user is within 100px of bottom
+        if (scrollTop + clientHeight >= scrollHeight - 100 && !isLoading && hasMoreAuctions) {
+            loadMoreAuctions();
+        }
+    });
+}
+
+function showLoadingIndicator() {
+    let loader = document.getElementById('loading-indicator');
+    if (!loader) {
+        loader = document.createElement('div');
+        loader.id = 'loading-indicator';
+        loader.className = 'fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-gray-800 text-white px-6 py-3 rounded-full shadow-lg animate-pulse z-50';
+        loader.innerHTML = `
+            <div class="flex items-center space-x-2">
+                <i class="fas fa-spinner fa-spin"></i>
+                <span>Loading more auctions...</span>
+            </div>
+        `;
+        document.body.appendChild(loader);
+    }
+    loader.style.display = 'block';
+}
+
+function hideLoadingIndicator() {
+    const loader = document.getElementById('loading-indicator');
+    if (loader) {
+        loader.style.display = 'none';
+    }
+}
+
+function addAuctionToGrid(auction, prepend = true) {
     if (!auctionsGrid) return;
     
     const auctionCard = createAuctionCard(auction);
-    auctionsGrid.insertAdjacentHTML("afterbegin", auctionCard);
+    // Prepend new auctions (from socket events), append when loading more
+    auctionsGrid.insertAdjacentHTML(prepend ? "afterbegin" : "beforeend", auctionCard);
 }
 
 function createAuctionCard(auction) {
@@ -448,6 +525,7 @@ function joinAuctionRoom(auctionId) {
 // Auto-refresh auctions every 30 seconds as fallback
 setInterval(() => {
     if (currentTab === "auctions") {
-        loadAuctions();
+        // Only refresh if we're on the first page to avoid losing position
+        loadAuctions(true);
     }
 }, 30000);
