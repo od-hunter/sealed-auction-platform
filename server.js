@@ -1,6 +1,8 @@
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const helmet = require('helmet');
@@ -56,13 +58,13 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Initialize database
-const db = new AuctionDatabase(process.env.DATABASE_PATH || './auctions.db');
+// Backup directory
+const backupDir = path.join(__dirname, 'backups');
 
-// In-memory storage (kept for backward compatibility, will be removed in future)
-const auctions = new Map();
-const bids = new Map();
-const users = new Map();
+// In-memory storage (in production, use a proper database)
+let auctions = new Map();
+let bids = new Map();
+let users = new Map();
 
 // Auction class
 class Auction {
@@ -155,6 +157,75 @@ function decryptBid(encryptedData, secretKey) {
   return parseFloat(decrypted);
 }
 
+// --- Backup and Restore ---
+async function backupData() {
+  try {
+    if (!fs.existsSync(backupDir)) {
+      fs.mkdirSync(backupDir, { recursive: true });
+    }
+
+    await Promise.all([
+      fs.promises.writeFile(path.join(backupDir, 'auctions.json'), JSON.stringify(Array.from(auctions.entries()), null, 2)),
+      fs.promises.writeFile(path.join(backupDir, 'bids.json'), JSON.stringify(Array.from(bids.entries()), null, 2)),
+      fs.promises.writeFile(path.join(backupDir, 'users.json'), JSON.stringify(Array.from(users.entries()), null, 2))
+    ]);
+
+    console.log(`[${new Date().toISOString()}] Data backup successful.`);
+  } catch (error) {
+    console.error('Data backup failed:', error);
+  }
+}
+
+function restoreData() {
+  try {
+    const auctionsPath = path.join(backupDir, 'auctions.json');
+    if (fs.existsSync(auctionsPath)) {
+      const data = JSON.parse(fs.readFileSync(auctionsPath));
+      const restoredAuctions = data.map(([id, plainAuction]) => {
+        const auction = Object.assign(new Auction(), plainAuction);
+        auction.endTime = new Date(auction.endTime);
+        auction.createdAt = new Date(auction.createdAt);
+        auction.bids = auction.bids.map(plainBid => Object.assign(new Bid(), plainBid));
+        return [id, auction];
+      });
+      auctions = new Map(restoredAuctions);
+      console.log(`Restored ${auctions.size} auctions from backup.`);
+    }
+
+    const bidsPath = path.join(backupDir, 'bids.json');
+    if (fs.existsSync(bidsPath)) {
+      const data = JSON.parse(fs.readFileSync(bidsPath));
+      const restoredBids = data.map(([id, plainBid]) => {
+        const bid = Object.assign(new Bid(), plainBid);
+        bid.timestamp = new Date(bid.timestamp);
+        return [id, bid];
+      });
+      bids = new Map(restoredBids);
+      console.log(`Restored ${bids.size} bids from backup.`);
+    }
+
+    const usersPath = path.join(backupDir, 'users.json');
+    if (fs.existsSync(usersPath)) {
+      const data = JSON.parse(fs.readFileSync(usersPath));
+      const restoredUsers = data.map(([id, plainUser]) => {
+        const user = Object.assign(new User(), plainUser);
+        user.createdAt = new Date(user.createdAt);
+        return [id, user];
+      });
+      users = new Map(restoredUsers);
+      console.log(`Restored ${users.size} users from backup.`);
+    }
+  } catch (error) {
+    console.error('Failed to restore data from backup. Starting with a clean state.', error);
+    auctions = new Map();
+    bids = new Map();
+    users = new Map();
+  }
+}
+
+// Restore data on startup
+restoreData();
+
 // Routes
 app.get('/api/auctions', (req, res) => {
   try {
@@ -188,47 +259,25 @@ app.post('/api/auctions', async (req, res) => {
     const auctionId = generateAuctionId();
     const auction = new Auction(auctionId, title, description, startingBid, new Date(endTime), userId);
     
-    // Save to database
-    db.createAuction(auction);
-    auctions.set(auctionId, auction); // Keep in-memory for backward compatibility
-    
-    io.emit('auctionCreated', auction);
-    res.status(201).json(auction);
+    try {
+      auctions.set(auctionId, auction);
+      io.emit('auctionCreated', auction);
+      res.status(201).json(auction);
+    } catch (transactionError) {
+      auctions.delete(auctionId);
+      throw transactionError;
+    }
   } catch (error) {
-    console.error('Error creating auction:', error);
+    console.error('Auction creation failed:', error);
     res.status(500).json({ error: 'Failed to create auction' });
   }
 });
 
 app.get('/api/auctions/:id', (req, res) => {
-  try {
-    const auctionDb = db.getAuction(req.params.id);
-    if (!auctionDb) {
-      return res.status(404).json({ error: 'Auction not found' });
-    }
-    
-    // Get from in-memory or create from DB
-    let auction = auctions.get(req.params.id);
-    if (!auction && auctionDb) {
-      auction = new Auction(
-        auctionDb.id,
-        auctionDb.title,
-        auctionDb.description,
-        auctionDb.starting_bid,
-        new Date(auctionDb.end_time),
-        auctionDb.creator_id
-      );
-      auction.status = auctionDb.status;
-      auction.currentHighestBid = auctionDb.current_highest_bid;
-      auction.winner = auctionDb.winner_id;
-      auction.winningBid = auctionDb.winning_bid_id;
-      auctions.set(req.params.id, auction);
-    }
-    
-    res.json(auction);
-  } catch (error) {
-    console.error('Error fetching auction:', error);
-    res.status(500).json({ error: 'Failed to fetch auction' });
+
+  const auction = auctions.get(req.params.id);
+  if (!auction) {
+    return res.status(404).json({ error: 'Auction not found' });
   }
 });
 
@@ -258,20 +307,29 @@ app.post('/api/bids', async (req, res) => {
     const bidId = uuidv4();
     const bid = new Bid(bidId, auctionId, bidderId, amount, encryptedBid);
     
-    // Save to database
-    db.createBid(bid);
-    bids.set(bidId, bid); // Keep in-memory for backward compatibility
-    
-    // Update auction's current highest bid
-    db.updateAuction(auctionId, { current_highest_bid: amount });
-    
-    io.emit('bidPlaced', { auctionId, bidCount: db.getBidCount(auctionId) });
-    res.status(201).json({ message: 'Bid placed successfully', bidId });
+    // Transaction: Save state for potential rollback
+    const originalBidsLength = auction.bids.length;
+    const originalHighestBid = auction.currentHighestBid;
+
+    try {
+      bids.set(bidId, bid);
+      auction.addBid(bid);
+      
+      io.emit('bidPlaced', { auctionId, bidCount: auction.bids.length });
+      res.status(201).json({ message: 'Bid placed successfully', bidId });
+    } catch (transactionError) {
+      // Rollback on failure
+      bids.delete(bidId);
+      auction.bids.length = originalBidsLength;
+      auction.currentHighestBid = originalHighestBid;
+      throw transactionError;
+    }
   } catch (error) {
-    console.error('Error placing bid:', error);
+    console.error('Bid placement failed:', error);
     res.status(500).json({ error: 'Failed to place bid' });
   }
 });
+
 
 app.post('/api/auctions/:id/close', (req, res) => {
   try {
@@ -401,6 +459,11 @@ setInterval(() => {
     }
   }
 }, 60000); // Check every minute
+
+// Schedule regular backups
+const BACKUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
+setInterval(backupData, BACKUP_INTERVAL);
+console.log(`Automated backup scheduled to run every ${BACKUP_INTERVAL / 60000} minutes.`);
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
