@@ -8,10 +8,10 @@ const bcrypt = require('bcrypt');
 const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { Server, Keypair, TransactionBuilder, Networks, BASE_FEE, Asset } = require('stellar-sdk');
-const AuctionDatabase = require('./database');
-require('dotenv').config();
+
 
 const app = express();
 const server = http.createServer(app);
@@ -24,6 +24,30 @@ const io = socketIo(server, {
 
 // Security middleware
 app.use(helmet());
+
+// Security monitoring endpoint (admin only)
+app.get('/api/security/stats', (req, res) => {
+  try {
+    // In production, add admin authentication here
+    const stats = db.getSecurityStats();
+    res.json(stats);
+  } catch (error) {
+    console.error('Error getting security stats:', error);
+    res.status(500).json({ error: 'Failed to get security stats' });
+  }
+});
+
+app.get('/api/security/logs', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    // In production, add admin authentication here
+    const logs = db.getQueryLog(limit);
+    res.json(logs);
+  } catch (error) {
+    console.error('Error getting query logs:', error);
+    res.status(500).json({ error: 'Failed to get query logs' });
+  }
+});
 
 // Restrictive CORS configuration
 const allowedOrigins = process.env.ALLOWED_ORIGINS
@@ -50,6 +74,18 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.static('public'));
+
+// Session middleware for OAuth
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'your-session-secret-change-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: process.env.NODE_ENV === 'production' }
+}));
+
+// Initialize Passport
+app.use(passport.initialize());
+app.use(passport.session());
 
 // Rate limiting
 const limiter = rateLimit({
@@ -117,10 +153,13 @@ class Bid {
 
 // User class
 class User {
-  constructor(id, username, hashedPassword) {
+  constructor(id, username, hashedPassword, email = null, provider = null, providerId = null) {
     this.id = id;
     this.username = username;
     this.hashedPassword = hashedPassword;
+    this.email = email;
+    this.provider = provider;
+    this.providerId = providerId;
     this.createdAt = new Date();
   }
 }
@@ -128,6 +167,37 @@ class User {
 // Helper functions
 function generateAuctionId() {
   return uuidv4();
+}
+
+// JWT Authentication Middleware
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  if (tokenBlacklist.has(token)) {
+    return res.status(401).json({ error: 'Token has been revoked' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+}
+
+// Generate JWT Token
+function generateToken(user) {
+  return jwt.sign(
+    { userId: user.id, username: user.username },
+    JWT_SECRET,
+    { expiresIn: '24h' }
+  );
 }
 
 function encryptBid(bidAmount, secretKey) {
@@ -224,10 +294,22 @@ function restoreData() {
 restoreData();
 
 // Routes
-app.get('/api/auctions', (req, res) => {
+app.get('/api/auctions', 
+  validateRequest.query({
+    page: { type: 'number' },
+    limit: { type: 'number' },
+    status: { type: 'status' }
+  }),
+  (req, res) => {
   try {
-    const auctions = db.getActiveAuctions();
-    const auctionList = auctions.map(auction => ({
+    const { page = 1, limit = 10, status = null } = req.sanitizedQuery || {};
+    
+    // Additional validation for limit to prevent excessive data loading
+    const validatedLimit = Math.min(limit, 100);
+    
+    const result = db.getPaginatedAuctions(page, validatedLimit, status);
+    
+    const auctionList = result.auctions.map(auction => ({
       id: auction.id,
       title: auction.title,
       description: auction.description,
@@ -238,19 +320,18 @@ app.get('/api/auctions', (req, res) => {
       bidCount: db.getBidCount(auction.id),
       creator: auction.creator_id
     }));
-    res.json(auctionList);
+    
+    res.json({
+      auctions: auctionList,
+      pagination: result.pagination
+    });
   } catch (error) {
     console.error('Error fetching auctions:', error);
     res.status(500).json({ error: 'Failed to fetch auctions' });
   }
 });
 
-app.post('/api/auctions', async (req, res) => {
-  try {
-    const { title, description, startingBid, endTime, userId } = req.body;
-    
-    if (!title || !description || !startingBid || !endTime || !userId) {
-      return res.status(400).json({ error: 'Missing required fields' });
+
     }
 
     const auctionId = generateAuctionId();
@@ -278,17 +359,7 @@ app.get('/api/auctions/:id', (req, res) => {
   }
 });
 
-app.post('/api/bids', async (req, res) => {
-  try {
-    const { auctionId, bidderId, amount, secretKey } = req.body;
-    
-    if (!auctionId || !bidderId || amount === undefined || !secretKey) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
 
-    // Get auction from database
-    const auctionDb = db.getAuction(auctionId);
-    if (!auctionDb) {
       return res.status(404).json({ error: 'Auction not found' });
     }
 
@@ -296,8 +367,10 @@ app.post('/api/bids', async (req, res) => {
       return res.status(400).json({ error: 'Auction is not active' });
     }
 
-    if (amount <= auctionDb.starting_bid) {
-      return res.status(400).json({ error: 'Bid must be higher than starting bid' });
+    // Validate bid amount against current highest bid
+    const minimumBid = Math.max(auctionDb.starting_bid, auctionDb.current_highest_bid || auctionDb.starting_bid);
+    if (amount <= minimumBid) {
+      return res.status(400).json({ error: `Bid must be higher than ${minimumBid}` });
     }
 
     const encryptedBid = encryptBid(amount, secretKey);
@@ -330,17 +403,19 @@ app.post('/api/bids', async (req, res) => {
 
 app.post('/api/auctions/:id/close', (req, res) => {
   try {
-    const auctionDb = db.getAuction(req.params.id);
+    const auctionId = req.sanitizedParams.id;
+    
+    const auctionDb = db.getAuction(auctionId);
     if (!auctionDb) {
       return res.status(404).json({ error: 'Auction not found' });
     }
 
-    if (auctionDb.status !== 'active') {
+
       return res.status(400).json({ error: 'Auction is already closed' });
     }
 
     // Get all bids and find winner
-    const allBids = db.getBidsForAuction(req.params.id);
+    const allBids = db.getBidsForAuction(auctionId);
     let winnerId = null;
     let winningBidId = null;
     
@@ -351,10 +426,10 @@ app.post('/api/auctions/:id/close', (req, res) => {
     }
     
     // Update auction in database
-    db.closeAuction(req.params.id, winnerId, winningBidId);
+    db.closeAuction(auctionId, winnerId, winningBidId);
     
     // Update in-memory
-    const auction = auctions.get(req.params.id);
+    const auction = auctions.get(auctionId);
     if (auction) {
       auction.close();
     }
@@ -367,16 +442,16 @@ app.post('/api/auctions/:id/close', (req, res) => {
   }
 });
 
-app.post('/api/users/register', async (req, res) => {
+app.post('/api/users/register', 
+  validateRequest.body({
+    username: { type: 'username', required: true },
+    password: { type: 'password', required: true }
+  }),
+  async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password } = req.sanitizedBody;
     
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
 
-    // Check if user exists in database
-    const existingUser = db.getUserByUsername(username);
     if (existingUser) {
       return res.status(400).json({ error: 'Username already exists' });
     }
@@ -385,21 +460,22 @@ app.post('/api/users/register', async (req, res) => {
     // Create user in database
     db.createUser(userId, username, password);
     
-    res.status(201).json({ userId, username });
+
   } catch (error) {
     console.error('Error registering user:', error);
     res.status(500).json({ error: 'Failed to register user' });
   }
 });
 
-app.post('/api/users/login', async (req, res) => {
+app.post('/api/users/login', 
+  validateRequest.body({
+    username: { type: 'string', required: true },
+    password: { type: 'string', required: true }
+  }),
+  async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password } = req.sanitizedBody;
     
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
-
     // Get user from database
     const user = db.getUserByUsername(username);
     if (!user) {
@@ -411,11 +487,75 @@ app.post('/api/users/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    res.json({ userId: user.id, username: user.username });
+    // Generate JWT token
+    const token = generateToken(user);
+    
+    res.json({ 
+      userId: user.id, 
+      username: user.username,
+      token: token,
+      expiresIn: '24h'
+    });
   } catch (error) {
     console.error('Error logging in user:', error);
     res.status(500).json({ error: 'Failed to login' });
   }
+});
+
+// New logout endpoint
+app.post('/api/users/logout', authenticateToken, (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (token) {
+      tokenBlacklist.add(token);
+    }
+    
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to logout' });
+  }
+});
+
+// New token validation endpoint
+app.get('/api/users/verify', authenticateToken, (req, res) => {
+  res.json({ 
+    valid: true, 
+    user: { 
+      userId: req.user.userId, 
+      username: req.user.username 
+    } 
+  });
+});
+
+// OAuth Routes
+app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+
+app.get('/auth/google/callback', 
+  passport.authenticate('google', { failureRedirect: '/login' }),
+  (req, res) => {
+    const token = generateToken(req.user);
+    res.redirect(`/?token=${token}&username=${req.user.username}`);
+  }
+);
+
+app.get('/auth/github', passport.authenticate('github', { scope: ['user:email'] }));
+
+app.get('/auth/github/callback',
+  passport.authenticate('github', { failureRedirect: '/login' }),
+  (req, res) => {
+    const token = generateToken(req.user);
+    res.redirect(`/?token=${token}&username=${req.user.username}`);
+  }
+);
+
+// OAuth status endpoint
+app.get('/api/auth/status', (req, res) => {
+  res.json({
+    google: !!GOOGLE_CLIENT_ID,
+    github: !!GITHUB_CLIENT_ID
+  });
 });
 
 // Socket.io connections
