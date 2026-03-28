@@ -256,6 +256,23 @@ function authenticateToken(req, res, next) {
   });
 }
 
+// Account Lockout Middleware
+function checkAccountLockout(req, res, next) {
+  const user = db.getUserById(req.user.userId);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  if (db.isAccountLocked(user.username)) {
+    return res.status(423).json({ 
+      error: 'Account is temporarily locked due to too many failed login attempts',
+      lockedUntil: user.locked_until
+    });
+  }
+
+  next();
+}
+
 // Generate JWT Token
 function generateToken(user) {
   return jwt.sign(
@@ -400,6 +417,7 @@ app.get('/api/auctions',
 
 app.post('/api/auctions', 
   authenticateToken,
+  checkAccountLockout,
   createLimiter,
   validateSchema('createAuction'),
   validateRequest.body({
@@ -478,6 +496,7 @@ app.get('/api/auctions/:id',
 
 app.post('/api/auctions/:id/bid', 
   authenticateToken,
+  checkAccountLockout,
   bidLimiter,
   validateSchema('placeBid'),
   validateRequest.body({
@@ -629,16 +648,46 @@ app.post('/api/users/login',
   try {
     const { username, password } = req.sanitizedBody;
     
+    // Check if account is locked before proceeding
+    if (db.isAccountLocked(username)) {
+      const user = db.getUserByUsername(username);
+      const lockedUntil = user ? new Date(user.locked_until) : null;
+      return res.status(423).json({ 
+        error: 'Account is temporarily locked due to too many failed login attempts',
+        lockedUntil: lockedUntil ? lockedUntil.toISOString() : null
+      });
+    }
+    
     // Get user from database
     const user = db.getUserByUsername(username);
     if (!user) {
+      // Don't reveal that user doesn't exist for security
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const isValid = await bcrypt.compare(password, user.hashed_password);
     if (!isValid) {
+      // Increment failed login attempts
+      db.incrementFailedLoginAttempts(username);
+      
+      // Check if this attempt should lock the account
+      const updatedUser = db.getUserByUsername(username);
+      const MAX_FAILED_ATTEMPTS = 5;
+      
+      if (updatedUser && updatedUser.failed_login_attempts >= MAX_FAILED_ATTEMPTS) {
+        db.lockAccount(username, 30); // Lock for 30 minutes
+        console.warn(`[SECURITY] Account locked for user: ${username} after ${MAX_FAILED_ATTEMPTS} failed attempts`);
+        return res.status(423).json({ 
+          error: 'Account has been locked due to too many failed login attempts',
+          lockedUntil: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+        });
+      }
+      
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+
+    // Reset failed login attempts on successful login
+    db.resetFailedLoginAttempts(username);
 
     // Generate JWT token
     const token = generateToken(user);
@@ -680,6 +729,36 @@ app.get('/api/users/verify', authenticateToken, (req, res) => {
       username: req.user.username 
     } 
   });
+});
+
+// Account lockout status endpoint
+app.get('/api/users/lockout-status', 
+  validateSchema('lockoutStatus'),
+  validateRequest.query({
+    username: { type: 'string', required: true }
+  }),
+  (req, res) => {
+  try {
+    const { username } = req.sanitizedQuery;
+    
+    const user = db.getUserByUsername(username);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const isLocked = db.isAccountLocked(username);
+    
+    res.json({
+      username: user.username,
+      isLocked,
+      failedLoginAttempts: user.failed_login_attempts || 0,
+      lastFailedLogin: user.last_failed_login,
+      lockedUntil: user.locked_until
+    });
+  } catch (error) {
+    console.error('Error checking lockout status:', error);
+    res.status(500).json({ error: 'Failed to check lockout status' });
+  }
 });
 
 // OAuth Routes (requires passport configuration)
@@ -749,6 +828,16 @@ setInterval(() => {
     }
   }
 }, 60000); // Check every minute
+
+// Auto-reset expired account lockouts
+setInterval(() => {
+  try {
+    db.resetExpiredLockouts();
+    console.log(`[${new Date().toISOString()}] Expired account lockouts reset.`);
+  } catch (error) {
+    console.error('Error resetting expired lockouts:', error);
+  }
+}, 5 * 60 * 1000); // Check every 5 minutes
 
 // Schedule regular backups
 const BACKUP_INTERVAL = 5 * 60 * 1000; // 5 minutes

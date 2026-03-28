@@ -21,6 +21,9 @@ class AuctionDatabase {
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         hashed_password TEXT NOT NULL,
+        failed_login_attempts INTEGER DEFAULT 0,
+        last_failed_login DATETIME,
+        locked_until DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -108,6 +111,101 @@ class AuctionDatabase {
     
     const stmt = this.securityLayer.prepare('SELECT * FROM users WHERE id = ?');
     return stmt.get(validation.sanitized);
+  }
+
+  // Account lockout methods
+  incrementFailedLoginAttempts(username) {
+    const validation = this.securityLayer.validateInput(username);
+    if (!validation.valid) {
+      console.warn('[SECURITY] Invalid username format:', username);
+      return null;
+    }
+
+    const now = new Date().toISOString();
+    const stmt = this.securityLayer.prepare(`
+      UPDATE users 
+      SET failed_login_attempts = failed_login_attempts + 1,
+          last_failed_login = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE username = ?
+    `);
+    return stmt.run(now, validation.sanitized);
+  }
+
+  lockAccount(username, lockDurationMinutes = 30) {
+    const validation = this.securityLayer.validateInput(username);
+    if (!validation.valid) {
+      console.warn('[SECURITY] Invalid username format:', username);
+      return null;
+    }
+
+    const lockedUntil = new Date();
+    lockedUntil.setMinutes(lockedUntil.getMinutes() + lockDurationMinutes);
+    
+    const stmt = this.securityLayer.prepare(`
+      UPDATE users 
+      SET locked_until = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE username = ?
+    `);
+    return stmt.run(lockedUntil.toISOString(), validation.sanitized);
+  }
+
+  resetFailedLoginAttempts(username) {
+    const validation = this.securityLayer.validateInput(username);
+    if (!validation.valid) {
+      console.warn('[SECURITY] Invalid username format:', username);
+      return null;
+    }
+
+    const stmt = this.securityLayer.prepare(`
+      UPDATE users 
+      SET failed_login_attempts = 0,
+          locked_until = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE username = ?
+    `);
+    return stmt.run(validation.sanitized);
+  }
+
+  isAccountLocked(username) {
+    const validation = this.securityLayer.validateInput(username);
+    if (!validation.valid) {
+      console.warn('[SECURITY] Invalid username format:', username);
+      return false;
+    }
+
+    const stmt = this.securityLayer.prepare(`
+      SELECT locked_until FROM users WHERE username = ?
+    `);
+    const result = stmt.get(validation.sanitized);
+    
+    if (!result || !result.locked_until) {
+      return false;
+    }
+
+    const lockedUntil = new Date(result.locked_until);
+    const now = new Date();
+    
+    // If lock has expired, reset it
+    if (lockedUntil <= now) {
+      this.resetFailedLoginAttempts(username);
+      return false;
+    }
+
+    return true;
+  }
+
+  resetExpiredLockouts() {
+    const now = new Date().toISOString();
+    const stmt = this.securityLayer.prepare(`
+      UPDATE users 
+      SET failed_login_attempts = 0,
+          locked_until = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE locked_until IS NOT NULL AND locked_until <= ?
+    `);
+    return stmt.run(now);
   }
 
   // Auction operations
