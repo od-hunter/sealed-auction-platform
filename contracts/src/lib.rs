@@ -60,12 +60,29 @@ const USER_AUCTIONS: Symbol = symbol_short!("U_AUCT");
 const USER_BIDS: Symbol = symbol_short!("U_BIDS");
 const HAS_COMMITTED: Symbol = symbol_short!("HAS_COM");
 const HAS_REVEALED: Symbol = symbol_short!("HAS_REV");
+const REENTRANCY_GUARD: Symbol = symbol_short!("NO_LOCK");
 
 #[contract]
 pub struct SealedBidAuction;
 
 #[contractimpl]
 impl SealedBidAuction {
+    // Reentrancy guard helper functions
+    fn require_not_locked(env: &Env) {
+        let is_locked: bool = env.storage().instance().get(&REENTRANCY_GUARD).unwrap_or(false);
+        if is_locked {
+            panic!("Reentrancy detected");
+        }
+    }
+
+    fn set_lock(env: &Env) {
+        env.storage().instance().set(&REENTRANCY_GUARD, &true);
+    }
+
+    fn remove_lock(env: &Env) {
+        env.storage().instance().set(&REENTRANCY_GUARD, &false);
+    }
+
     /// Create a new auction
     pub fn create_auction(
         env: Env,
@@ -74,13 +91,19 @@ impl SealedBidAuction {
         starting_bid: u64,
         duration: u64,
     ) -> u64 {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let creator = env.current_contract_address();
         
         // Validate inputs
         if starting_bid == 0 {
+            Self::remove_lock(&env);
             panic!("Starting bid must be greater than 0");
         }
         if duration == 0 {
+            Self::remove_lock(&env);
             panic!("Duration must be greater than 0");
         }
         
@@ -124,6 +147,9 @@ impl SealedBidAuction {
             (title, starting_bid, end_time),
         );
         
+        // Remove lock
+        Self::remove_lock(&env);
+        
         auction_id
     }
     
@@ -134,6 +160,10 @@ impl SealedBidAuction {
         commitment: String,
         bid_amount: u64,
     ) -> u64 {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let bidder = env.current_contract_address();
         
         // Get auction
@@ -205,6 +235,9 @@ impl SealedBidAuction {
             (bidder, commitment),
         );
         
+        // Remove lock
+        Self::remove_lock(&env);
+        
         bid_id
     }
     
@@ -215,6 +248,10 @@ impl SealedBidAuction {
         bid_amount: u64,
         secret: String,
     ) {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let bids = env.storage().instance().get(&BIDS).unwrap_or(Vec::new(&env));
         let mut bid = bids.get(bid_id as u32).unwrap_or_else(|| panic!("Bid not found"));
         
@@ -267,10 +304,17 @@ impl SealedBidAuction {
             (symbol_short!("bid_revealed"), bid.auction_id, bid_id),
             (bid.bidder.clone(), bid_amount),
         );
+        
+        // Remove lock
+        Self::remove_lock(&env);
     }
     
     /// End an auction
     pub fn end_auction(env: Env, auction_id: u64) {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let mut auctions = env.storage().instance().get(&AUCTIONS).unwrap_or(Vec::new(&env));
         let mut auction = auctions.get(auction_id as u32).unwrap_or_else(|| panic!("Auction not found"));
         
@@ -295,10 +339,17 @@ impl SealedBidAuction {
             (symbol_short!("auction_ended"), auction_id),
             (auction.highest_bidder.clone(), auction.highest_bid),
         );
+        
+        // Remove lock
+        Self::remove_lock(&env);
     }
     
     /// Cancel an auction
     pub fn cancel_auction(env: Env, auction_id: u64) {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let mut auctions = env.storage().instance().get(&AUCTIONS).unwrap_or(Vec::new(&env));
         let mut auction = auctions.get(auction_id as u32).unwrap_or_else(|| panic!("Auction not found"));
         
@@ -323,6 +374,9 @@ impl SealedBidAuction {
             (symbol_short!("auction_cancelled"), auction_id),
             (),
         );
+        
+        // Remove lock
+        Self::remove_lock(&env);
     }
     
     /// Get auction details
