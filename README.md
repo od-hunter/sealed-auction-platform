@@ -76,20 +76,21 @@ npm run dev
 - System theme preference is detected and respected by default
 - Smooth transitions between theme changes
 
+<!-- ODHUNTER: Updated standard RESTful endpoints for consistency -->
 ## API Endpoints
 
 ### Authentication
-- `POST /api/users/register` - Register a new user
-- `POST /api/users/login` - Login an existing user
+- `POST /api/users` - Register a new user
+- `POST /api/auth/login` - Login an existing user
 
 ### Auctions
 - `GET /api/auctions` - Get all auctions
 - `POST /api/auctions` - Create a new auction
 - `GET /api/auctions/:id` - Get specific auction details
-- `POST /api/auctions/:id/close` - Close an auction manually
+- `PATCH /api/auctions/:id` - Close an auction manually
 
 ### Bids
-- `POST /api/bids` - Place a sealed bid
+- `POST /api/auctions/:id/bids` - Place a sealed bid
 
 ## Security Considerations
 

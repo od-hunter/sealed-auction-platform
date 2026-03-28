@@ -173,9 +173,11 @@ app.get('/api/auctions/:id', (req, res) => {
   res.json(auction);
 });
 
-app.post('/api/bids', async (req, res) => {
+// ODHUNTER: Updated /api/bids to normalized /api/auctions/:id/bids
+app.post('/api/auctions/:id/bids', async (req, res) => {
   try {
-    const { auctionId, bidderId, amount, secretKey } = req.body;
+    const { bidderId, amount, secretKey } = req.body;
+    const auctionId = req.params.id;
     
     if (!auctionId || !bidderId || amount === undefined || !secretKey) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -212,7 +214,8 @@ app.post('/api/bids', async (req, res) => {
   }
 });
 
-app.post('/api/auctions/:id/close', (req, res) => {
+// ODHUNTER: Updated legacy /api/auctions/:id/close to PATCH /api/auctions/:id
+app.patch('/api/auctions/:id', (req, res) => {
   try {
     const auction = auctions.get(req.params.id);
     if (!auction) {
@@ -237,7 +240,8 @@ app.post('/api/auctions/:id/close', (req, res) => {
 });
 
 // Simplified auth routes for testing
-app.post('/api/users/register', async (req, res) => {
+// ODHUNTER: Updated /api/users/register to standard /api/users
+app.post('/api/users', async (req, res) => {
   try {
     const { username, password } = req.body;
     
@@ -261,7 +265,8 @@ app.post('/api/users/register', async (req, res) => {
   }
 });
 
-app.post('/api/users/login', async (req, res) => {
+// ODHUNTER: Updated /api/users/login to standard /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
     

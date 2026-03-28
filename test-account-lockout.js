@@ -58,7 +58,8 @@ async function testAccountLockout() {
   try {
     // Step 1: Register a test user
     console.log('1️⃣ Registering test user...');
-    const registerResponse = await makeRequest('/api/users/register', 'POST', testUser);
+    // ODHUNTER: Updated /api/users/register to standard /api/users
+    const registerResponse = await makeRequest('/api/users', 'POST', testUser);
     if (registerResponse.status === 201) {
       console.log('✅ User registered successfully');
     } else {
@@ -70,7 +71,8 @@ async function testAccountLockout() {
     console.log('\n2️⃣ Testing failed login attempts...');
     for (let i = 1; i <= 6; i++) {
       try {
-        const loginResponse = await makeRequest('/api/users/login', 'POST', {
+        // ODHUNTER: Updated /api/users/login to standard /api/auth/login
+        const loginResponse = await makeRequest('/api/auth/login', 'POST', {
           username: testUser.username,
           password: 'wrongpassword'
         });
@@ -92,7 +94,8 @@ async function testAccountLockout() {
     // Step 4: Try to login with correct password while locked
     console.log('\n4️⃣ Attempting login with correct password while locked...');
     try {
-      const loginResponse = await makeRequest('/api/users/login', 'POST', testUser);
+      // ODHUNTER: Updated /api/users/login to standard /api/auth/login
+      const loginResponse = await makeRequest('/api/auth/login', 'POST', testUser);
       console.log('❌ Should have been locked out but got', loginResponse.status);
     } catch (error) {
       console.log('❌ Network error:', error.message);
