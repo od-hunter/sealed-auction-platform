@@ -11,7 +11,12 @@ const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { Server, Keypair, TransactionBuilder, Networks, BASE_FEE, Asset } = require('stellar-sdk');
+const session = require('express-session');
+const passport = require('passport');
+const AuctionDatabase = require('./database');
 
+// Initialize database
+const db = new AuctionDatabase();
 
 const app = express();
 const server = http.createServer(app);
@@ -87,12 +92,71 @@ app.use(session({
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Rate limiting
-const limiter = rateLimit({
+// Rate limiting configuration
+const JWT_SECRET = process.env.JWT_SECRET || 'your-jwt-secret-change-in-production';
+const tokenBlacklist = new Set();
+
+// Import validation middleware
+const { validateRequest } = require('./utils/validation');
+
+// Tiered rate limiting configuration
+// Strict limits for authentication endpoints
+const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 5, // limit each IP to 5 requests per windowMs
+  message: {
+    error: 'Too many authentication attempts, please try again after 15 minutes'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
-app.use(limiter);
+
+// Moderate limits for bid operations
+const bidLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // limit each IP to 30 requests per windowMs
+  message: {
+    error: 'Too many bid operations, please slow down'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Higher limits for read operations
+const readLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    error: 'Too many requests, please try again later'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Very strict limits for auction creation
+const createLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // limit each IP to 10 auction creations per hour
+  message: {
+    error: 'Too many auction creations, please try again later'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// General API limiter as fallback
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    error: 'Too many requests, please try again later'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Apply general rate limiting to all routes
+app.use(generalLimiter);
 
 // Backup directory
 const backupDir = path.join(__dirname, 'backups');
@@ -295,6 +359,7 @@ restoreData();
 
 // Routes
 app.get('/api/auctions', 
+  readLimiter,
   validateRequest.query({
     page: { type: 'number' },
     limit: { type: 'number' },
@@ -331,35 +396,100 @@ app.get('/api/auctions',
   }
 });
 
-
+app.post('/api/auctions', 
+  authenticateToken,
+  createLimiter,
+  validateRequest.body({
+    title: { type: 'title', required: true },
+    description: { type: 'description', required: true },
+    startingBid: { type: 'bidAmount', required: true, minimumBid: 0.01 },
+    endTime: { type: 'date', required: true, allowPast: false }
+  }),
+  async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { title, description, startingBid, endTime } = req.sanitizedBody;
+    
+    // Check if user exists
+    const user = db.getUserById(userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
     const auctionId = generateAuctionId();
-    const auction = new Auction(auctionId, title, description, startingBid, new Date(endTime), userId);
     
-    try {
-      auctions.set(auctionId, auction);
-      io.emit('auctionCreated', auction);
-      res.status(201).json(auction);
-    } catch (transactionError) {
-      auctions.delete(auctionId);
-      throw transactionError;
-    }
+    // Create auction in database
+    db.createAuction({
+      id: auctionId,
+      title,
+      description,
+      startingBid,
+      endTime,
+      creator: userId,
+      status: 'active'
+    });
+    
+    // Also create in-memory for compatibility
+    const auction = new Auction(auctionId, title, description, startingBid, new Date(endTime), userId);
+    auctions.set(auctionId, auction);
+    
+    io.emit('auctionCreated', auction);
+    res.status(201).json(auction);
   } catch (error) {
     console.error('Auction creation failed:', error);
     res.status(500).json({ error: 'Failed to create auction' });
   }
 });
 
-app.get('/api/auctions/:id', (req, res) => {
+app.get('/api/auctions/:id', 
+  readLimiter,
+  validateRequest.params({
+    id: { type: 'uuid', required: true }
+  }),
+  (req, res) => {
+  try {
+    const auctionId = req.sanitizedParams.id;
+    
+    const auctionDb = db.getAuction(auctionId);
+    if (!auctionDb) {
+      return res.status(404).json({ error: 'Auction not found' });
+    }
 
-  const auction = auctions.get(req.params.id);
-  if (!auction) {
-    return res.status(404).json({ error: 'Auction not found' });
+    res.json({
+      id: auctionDb.id,
+      title: auctionDb.title,
+      description: auctionDb.description,
+      startingBid: auctionDb.starting_bid,
+      currentHighestBid: auctionDb.current_highest_bid || auctionDb.starting_bid,
+      endTime: auctionDb.end_time,
+      status: auctionDb.status,
+      bidCount: db.getBidCount(auctionId),
+      creator: auctionDb.creator_id
+    });
+  } catch (error) {
+    console.error('Error fetching auction:', error);
+    res.status(500).json({ error: 'Failed to fetch auction' });
   }
 });
 
-
+app.post('/api/auctions/:id/bid', 
+  authenticateToken,
+  bidLimiter,
+  validateRequest.body({
+    amount: { type: 'bidAmount', required: true, minimumBid: 0.01 },
+    secretKey: { type: 'secretKey', required: true }
+  }),
+  validateRequest.params({
+    id: { type: 'uuid', required: true }
+  }),
+  async (req, res) => {
+  try {
+    const auctionId = req.sanitizedParams.id;
+    const bidderId = req.user.userId;
+    const { amount, secretKey } = req.sanitizedBody;
+    
+    const auctionDb = db.getAuction(auctionId);
+    if (!auctionDb) {
       return res.status(404).json({ error: 'Auction not found' });
     }
 
@@ -377,31 +507,39 @@ app.get('/api/auctions/:id', (req, res) => {
     const bidId = uuidv4();
     const bid = new Bid(bidId, auctionId, bidderId, amount, encryptedBid);
     
-    // Transaction: Save state for potential rollback
-    const originalBidsLength = auction.bids.length;
-    const originalHighestBid = auction.currentHighestBid;
-
-    try {
-      bids.set(bidId, bid);
+    // Save bid to database
+    db.createBid({
+      id: bidId,
+      auctionId,
+      bidderId,
+      amount,
+      encryptedBid
+    });
+    
+    // Update auction's current highest bid
+    db.updateAuction(auctionId, { current_highest_bid: amount });
+    
+    // Also update in-memory for compatibility
+    const auction = auctions.get(auctionId);
+    if (auction) {
       auction.addBid(bid);
-      
-      io.emit('bidPlaced', { auctionId, bidCount: auction.bids.length });
-      res.status(201).json({ message: 'Bid placed successfully', bidId });
-    } catch (transactionError) {
-      // Rollback on failure
-      bids.delete(bidId);
-      auction.bids.length = originalBidsLength;
-      auction.currentHighestBid = originalHighestBid;
-      throw transactionError;
     }
+    
+    io.emit('bidPlaced', { auctionId, bidCount: auction ? auction.bids.length : 1 });
+    res.status(201).json({ message: 'Bid placed successfully', bidId });
   } catch (error) {
     console.error('Bid placement failed:', error);
     res.status(500).json({ error: 'Failed to place bid' });
   }
 });
 
-
-app.post('/api/auctions/:id/close', (req, res) => {
+app.post('/api/auctions/:id/close', 
+  authenticateToken,
+  bidLimiter,
+  validateRequest.params({
+    id: { type: 'uuid', required: true }
+  }),
+  (req, res) => {
   try {
     const auctionId = req.sanitizedParams.id;
     
@@ -410,7 +548,7 @@ app.post('/api/auctions/:id/close', (req, res) => {
       return res.status(404).json({ error: 'Auction not found' });
     }
 
-
+    if (auctionDb.status === 'closed') {
       return res.status(400).json({ error: 'Auction is already closed' });
     }
 
@@ -443,6 +581,7 @@ app.post('/api/auctions/:id/close', (req, res) => {
 });
 
 app.post('/api/users/register', 
+  authLimiter,
   validateRequest.body({
     username: { type: 'username', required: true },
     password: { type: 'password', required: true }
@@ -451,7 +590,8 @@ app.post('/api/users/register',
   try {
     const { username, password } = req.sanitizedBody;
     
-
+    // Check if user already exists
+    const existingUser = db.getUserByUsername(username);
     if (existingUser) {
       return res.status(400).json({ error: 'Username already exists' });
     }
@@ -460,7 +600,11 @@ app.post('/api/users/register',
     // Create user in database
     db.createUser(userId, username, password);
     
-
+    res.status(201).json({ 
+      userId, 
+      username,
+      message: 'User registered successfully'
+    });
   } catch (error) {
     console.error('Error registering user:', error);
     res.status(500).json({ error: 'Failed to register user' });
@@ -468,6 +612,7 @@ app.post('/api/users/register',
 });
 
 app.post('/api/users/login', 
+  authLimiter,
   validateRequest.body({
     username: { type: 'string', required: true },
     password: { type: 'string', required: true }
@@ -529,7 +674,7 @@ app.get('/api/users/verify', authenticateToken, (req, res) => {
   });
 });
 
-// OAuth Routes
+// OAuth Routes (requires passport configuration)
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 
 app.get('/auth/google/callback', 
@@ -553,8 +698,8 @@ app.get('/auth/github/callback',
 // OAuth status endpoint
 app.get('/api/auth/status', (req, res) => {
   res.json({
-    google: !!GOOGLE_CLIENT_ID,
-    github: !!GITHUB_CLIENT_ID
+    google: !!process.env.GOOGLE_CLIENT_ID,
+    github: !!process.env.GITHUB_CLIENT_ID
   });
 });
 
