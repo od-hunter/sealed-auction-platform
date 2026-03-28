@@ -1,3 +1,11 @@
+// Initialize APM (MUST be the first line)
+const apm = require('elastic-apm-node').start({
+  serviceName: process.env.APM_SERVICE_NAME || 'sealed-auction-platform',
+  secretToken: process.env.APM_SECRET_TOKEN || '',
+  serverUrl: process.env.APM_SERVER_URL || 'http://localhost:8200',
+  environment: process.env.NODE_ENV || 'development'
+});
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
