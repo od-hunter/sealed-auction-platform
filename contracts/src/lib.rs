@@ -2,6 +2,9 @@
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec, Symbol, symbol_short, map, bytes};
 
+// Maximum bid amount to prevent overflow (in stroops)
+const MAX_BID_AMOUNT: u64 = u64::MAX / 2; // Use half of u64::MAX for safety
+
 // Contract type definitions
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,12 +63,29 @@ const USER_AUCTIONS: Symbol = symbol_short!("U_AUCT");
 const USER_BIDS: Symbol = symbol_short!("U_BIDS");
 const HAS_COMMITTED: Symbol = symbol_short!("HAS_COM");
 const HAS_REVEALED: Symbol = symbol_short!("HAS_REV");
+const REENTRANCY_GUARD: Symbol = symbol_short!("NO_LOCK");
 
 #[contract]
 pub struct SealedBidAuction;
 
 #[contractimpl]
 impl SealedBidAuction {
+    // Reentrancy guard helper functions
+    fn require_not_locked(env: &Env) {
+        let is_locked: bool = env.storage().instance().get(&REENTRANCY_GUARD).unwrap_or(false);
+        if is_locked {
+            panic!("Reentrancy detected");
+        }
+    }
+
+    fn set_lock(env: &Env) {
+        env.storage().instance().set(&REENTRANCY_GUARD, &true);
+    }
+
+    fn remove_lock(env: &Env) {
+        env.storage().instance().set(&REENTRANCY_GUARD, &false);
+    }
+
     /// Create a new auction
     pub fn create_auction(
         env: Env,
@@ -74,18 +94,39 @@ impl SealedBidAuction {
         starting_bid: u64,
         duration: u64,
     ) -> u64 {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let creator = env.current_contract_address();
         
         // Validate inputs
         if starting_bid == 0 {
+            Self::remove_lock(&env);
             panic!("Starting bid must be greater than 0");
         }
         if duration == 0 {
+            Self::remove_lock(&env);
             panic!("Duration must be greater than 0");
         }
         
-        // Get next auction ID
-        let auction_id = env.storage().instance().get(&AUCTION_COUNTER).unwrap_or(0) + 1;
+        // Overflow check for starting bid
+        if starting_bid > MAX_BID_AMOUNT {
+            Self::remove_lock(&env);
+            panic!("Starting bid exceeds maximum allowed amount");
+        }
+        
+        // Overflow check for duration (max 1 year in seconds)
+        const MAX_DURATION: u64 = 365 * 24 * 60 * 60; // 1 year
+        if duration > MAX_DURATION {
+            Self::remove_lock(&env);
+            panic!("Duration too long");
+        }
+        
+        // Get next auction ID with overflow check
+        let current_counter: u64 = env.storage().instance().get(&AUCTION_COUNTER).unwrap_or(0);
+        let auction_id = current_counter.checked_add(1)
+            .unwrap_or_else(|| panic!("Auction counter overflow"));
         env.storage().instance().set(&AUCTION_COUNTER, &auction_id);
         
         let end_time = env.ledger().timestamp() + duration;
@@ -124,6 +165,9 @@ impl SealedBidAuction {
             (title, starting_bid, end_time),
         );
         
+        // Remove lock
+        Self::remove_lock(&env);
+        
         auction_id
     }
     
@@ -134,6 +178,10 @@ impl SealedBidAuction {
         commitment: String,
         bid_amount: u64,
     ) -> u64 {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let bidder = env.current_contract_address();
         
         // Get auction
@@ -156,11 +204,20 @@ impl SealedBidAuction {
         
         // Validate bid amount
         if bid_amount < auction.starting_bid {
+            Self::remove_lock(&env);
             panic!("Bid below starting amount");
         }
         
-        // Get next bid ID
-        let bid_id = env.storage().instance().get(&BID_COUNTER).unwrap_or(0) + 1;
+        // Overflow check for bid amount
+        if bid_amount > MAX_BID_AMOUNT {
+            Self::remove_lock(&env);
+            panic!("Bid amount exceeds maximum allowed");
+        }
+        
+        // Get next bid ID with overflow check
+        let current_bid_counter: u64 = env.storage().instance().get(&BID_COUNTER).unwrap_or(0);
+        let bid_id = current_bid_counter.checked_add(1)
+            .unwrap_or_else(|| panic!("Bid counter overflow"));
         env.storage().instance().set(&BID_COUNTER, &bid_id);
         
         // Create bid
@@ -181,10 +238,14 @@ impl SealedBidAuction {
         bids.push_back(bid.clone());
         env.storage().instance().set(&BIDS, &bids);
         
-        // Update auction bid count
+        // Update auction bid count with overflow check
         let mut auctions = env.storage().instance().get(&AUCTIONS).unwrap_or(Vec::new(&env));
         let mut auction = auctions.get(auction_id as u32).unwrap();
-        auction.bid_count += 1;
+        
+        // Safe increment with overflow check
+        auction.bid_count = auction.bid_count.checked_add(1)
+            .unwrap_or_else(|| panic!("Bid count overflow"));
+        
         auctions.set(auction_id as u32, auction);
         env.storage().instance().set(&AUCTIONS, &auctions);
         
@@ -205,6 +266,9 @@ impl SealedBidAuction {
             (bidder, commitment),
         );
         
+        // Remove lock
+        Self::remove_lock(&env);
+        
         bid_id
     }
     
@@ -215,6 +279,10 @@ impl SealedBidAuction {
         bid_amount: u64,
         secret: String,
     ) {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let bids = env.storage().instance().get(&BIDS).unwrap_or(Vec::new(&env));
         let mut bid = bids.get(bid_id as u32).unwrap_or_else(|| panic!("Bid not found"));
         
@@ -237,7 +305,14 @@ impl SealedBidAuction {
         // Verify commitment
         let expected_commitment = Self::get_commitment(env, bid_amount, secret.clone());
         if expected_commitment != bid.commitment {
+            Self::remove_lock(&env);
             panic!("Invalid commitment");
+        }
+        
+        // Overflow check for bid amount
+        if bid_amount > MAX_BID_AMOUNT {
+            Self::remove_lock(&env);
+            panic!("Bid amount exceeds maximum allowed");
         }
         
         // Update bid
@@ -251,8 +326,9 @@ impl SealedBidAuction {
         bids.set(bid_id as u32, bid.clone());
         env.storage().instance().set(&BIDS, &bids);
         
-        // Update highest bid if necessary
+        // Update highest bid if necessary with overflow check
         if bid_amount > auction.highest_bid {
+            // Safe comparison - no overflow possible here since we're just comparing
             auction.highest_bid = bid_amount;
             auction.highest_bidder = bid.bidder.clone();
         }
@@ -267,10 +343,17 @@ impl SealedBidAuction {
             (symbol_short!("bid_revealed"), bid.auction_id, bid_id),
             (bid.bidder.clone(), bid_amount),
         );
+        
+        // Remove lock
+        Self::remove_lock(&env);
     }
     
     /// End an auction
     pub fn end_auction(env: Env, auction_id: u64) {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let mut auctions = env.storage().instance().get(&AUCTIONS).unwrap_or(Vec::new(&env));
         let mut auction = auctions.get(auction_id as u32).unwrap_or_else(|| panic!("Auction not found"));
         
@@ -295,10 +378,17 @@ impl SealedBidAuction {
             (symbol_short!("auction_ended"), auction_id),
             (auction.highest_bidder.clone(), auction.highest_bid),
         );
+        
+        // Remove lock
+        Self::remove_lock(&env);
     }
     
     /// Cancel an auction
     pub fn cancel_auction(env: Env, auction_id: u64) {
+        // Reentrancy guard
+        Self::require_not_locked(&env);
+        Self::set_lock(&env);
+
         let mut auctions = env.storage().instance().get(&AUCTIONS).unwrap_or(Vec::new(&env));
         let mut auction = auctions.get(auction_id as u32).unwrap_or_else(|| panic!("Auction not found"));
         
@@ -323,6 +413,9 @@ impl SealedBidAuction {
             (symbol_short!("auction_cancelled"), auction_id),
             (),
         );
+        
+        // Remove lock
+        Self::remove_lock(&env);
     }
     
     /// Get auction details
